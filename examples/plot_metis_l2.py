@@ -15,6 +15,9 @@ import sunpy.map
 from sunpy.net import Fido, attrs as a
 import sunpy_soar
 from astropy.io import fits
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+from sunpy.coordinates import skycoord_to_pixel
 
 
 
@@ -60,7 +63,7 @@ downloaded_files = Fido.fetch(search_results[0, 0])
 #
 # We will define two functions to do this: `cut_metis_fov` and `read_metis`
 
-def cut_metis_fov(hdu, qflag, mask_value=np.nan):
+def cut_metis_fov(map, qflag, mask_value=np.nan):
     """
     Masks regions of the Metis instrument field of view (FOV) in the provided FITS HDU data array.
     This function sets pixels to NaN in the HDU data array based on their location relative to the instrument's
@@ -72,8 +75,8 @@ def cut_metis_fov(hdu, qflag, mask_value=np.nan):
     The FOV boundaries are calculated using header information from the HDU, including plate scale and FOV radii.
     Parameters
     ----------
-    hdu : astropy.io.fits.PrimaryHDU or similar
-        FITS HDU object containing image data and relevant header keywords.
+    map : sunpy.map.Map
+        SunPy map object containing the FITS HDU data and metadata.
     qflag : numpy.ndarray
         Array of quality flags with the same shape as the HDU data. Pixels with a value of 0 are considered invalid.
     mask_value : float, optional
@@ -83,30 +86,34 @@ def cut_metis_fov(hdu, qflag, mask_value=np.nan):
     ------
     ValueError
         If the plate scale in the x and y directions (CDELT1 and CDELT2) are not equal.
-    Modifies
-    --------
-    hdu.data : numpy.ndarray
-        The data array in the HDU is modified in-place, with masked regions set to NaN.
+    Returns
+    -------
+    map_new : sunpy.map.Map
+        A new SunPy map object with the masked data.
     """
 
     # check if plate scale is the same in x and y direction
-    if hdu.header['CDELT1'] != hdu.header['CDELT2']:
-        raise ValueError("Error. CDELT1 != CDELT2 for {fname}".format(fname=hdu.header['FILENAME']))
+    if map.meta['CDELT1'] != map.meta['CDELT2']:
+        raise ValueError("Error. CDELT1 != CDELT2 for {fname}".format(fname=map.meta['FILENAME']))
     # Get FOV in pixel
-    fov1 = hdu.header['INN_FOV']*3600/hdu.header['CDELT1']  # pix
-    fov2 = hdu.header['OUT_FOV']*3600/hdu.header['CDELT2']  # pix
+    fov1 = map.meta['INN_FOV']*3600/map.meta['CDELT1']  # pix
+    fov2 = map.meta['OUT_FOV']*3600/map.meta['CDELT2']  # pix
     # Create meshgrid of pixel coordinates
-    x = np.arange(0, hdu.header['NAXIS1'], 1)
-    y = np.arange(0, hdu.header['NAXIS2'], 1)
+    x = np.arange(0, map.meta['NAXIS1'], 1)
+    y = np.arange(0, map.meta['NAXIS2'], 1)
     xx, yy = np.meshgrid(x, y, sparse=True)
     # Calculate distance from Sun center and occulter center
-    dist_suncen = np.sqrt((xx-hdu.header['SUN_XCEN'])**2 + (yy-hdu.header['SUN_YCEN'])**2)
-    dist_iocen = np.sqrt((xx-hdu.header['IO_XCEN'])**2 + (yy-hdu.header['IO_YCEN'])**2)
+    suncenter_pix = skycoord_to_pixel(SkyCoord(0*u.arcsec, 0*u.arcsec, frame=map.coordinate_frame), map.wcs)
+    dist_suncen = np.sqrt((xx-suncenter_pix[0])**2 + (yy-suncenter_pix[1])**2)
+    dist_iocen = np.sqrt((xx-map.meta['IO_XCEN'])**2 + (yy-map.meta['IO_YCEN'])**2)
     # Mask data outside FOV and bad pixels
-    hdu.data[dist_iocen < fov1] = mask_value
-    hdu.data[dist_suncen > fov2] = mask_value
+    map.data[dist_iocen < fov1] = mask_value
+    map.data[dist_suncen > fov2] = mask_value
     # Mask bad pixels based on quality flag
-    hdu.data[qflag == 0] = mask_value
+    map.data[qflag == 0] = mask_value
+
+    map_new = sunpy.map.Map(map.data, map.meta)
+    return map_new
 
 def read_metis(filepath, rot=True):
     """
@@ -121,14 +128,17 @@ def read_metis(filepath, rot=True):
         If True, the resulting SunPy map will be rotated to have solar north up. Default is True.
     Returns         
     -------
-    sunpy.map.Map
+    map_metis: sunpy.map.Map
         A SunPy map object containing the processed Metis data.
     """
     hdu0 = fits.open(filepath)[0]
-    hdu1 = fits.open(filepath)[1]
-    cut_metis_fov(hdu0, hdu1.data)
+    qflag = fits.open(filepath)[1]
+    # Update RSUN_OBS keyword to use RSUN_ARC value
     hdu0.header['RSUN_OBS'] = hdu0.header['RSUN_ARC']
     map_metis = sunpy.map.Map(hdu0.data, hdu0.header)
+
+    map_metis = cut_metis_fov(map_metis, qflag.data)
+
     if rot == True:
         map_metis = map_metis.rotate()
 
